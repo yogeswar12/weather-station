@@ -1,0 +1,74 @@
+# 🔹 `server_logger/logger.py` (Optional Python Backend)
+
+```python
+import mysql.connector
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+# Database connection
+db = mysql.connector.connect(
+    host="localhost",
+    user="your_username",
+    password="your_password",
+    database="weather_db"
+)
+cursor = db.cursor()
+
+@app.route("/log", methods=["POST"])
+def log_data():
+    data = request.json
+    try:
+        cursor.execute("""
+            INSERT INTO weather_data (temperature, humidity, pressure, altitude, wind_speed, voltage)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (
+            data["temperature"],
+            data["humidity"],
+            data["pressure"],
+            data["altitude"],
+            data["wind_speed"],
+            data["voltage"]
+        ))
+        db.commit()
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
+server_logger/schema.sql
+CREATE DATABASE weather_db;
+
+USE weather_db;
+
+CREATE TABLE weather_data (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    temperature FLOAT,
+    humidity FLOAT,
+    pressure FLOAT,
+    altitude FLOAT,
+    wind_speed FLOAT,
+    voltage FLOAT
+);
+WiFiClient client;
+HTTPClient http;
+http.begin(client, "http://<SERVER_IP>:5000/log");
+http.addHeader("Content-Type", "application/json");
+
+String json = "{\"temperature\":" + String(t) +
+              ",\"humidity\":" + String(h) +
+              ",\"pressure\":" + String(pressure_hPa) +
+              ",\"altitude\":" + String(altitude_m) +
+              ",\"wind_speed\":" + String(wind_mps) +
+              ",\"voltage\":" + String(vAnem) + "}";
+
+http.POST(json);
+http.end();
+you have two modes:
+
+ESP8266 → Blynk Cloud (real-time mobile app)
+
+ESP8266 → Python + MySQL (local logging & analysis)
+Blynk.virtualWrite(V0, t);
