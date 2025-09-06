@@ -1,0 +1,155 @@
+/*******************************************************
+ * ESP8266 Weather Station (DHT11 + BMP180 + Anemometer)
+ * Sends data to Blynk IoT every 1 second
+ *
+ * Board: NodeMCU 1.0 ESP8266
+ *
+ * Pin map (NodeMCU labels):
+ *   D4 (GPIO2)  -> DHT11 data
+ *   A0          -> Anemometer (DC generator) analog output
+ *   I2C: D2(SDA, GPIO4) / D1(SCL, GPIO5) -> BMP180 (default)
+ *
+ * Blynk Virtual Pins:
+ *   V0 -> Temperature (°C)
+ *   V1 -> Humidity (%)
+ *   V2 -> Pressure (hPa)
+ *   V3 -> Altitude (m)
+ *   V4 -> Wind Speed (m/s)
+ *   V5 -> Anemometer Voltage (V)
+ *******************************************************/
+
+#define BLYNK_TEMPLATE_ID   "YOUR_TEMPLATE_ID"
+#define BLYNK_TEMPLATE_NAME "ESP8266 Weather Station"
+#define BLYNK_AUTH_TOKEN    "YOUR_BLYNK_AUTH_TOKEN"
+
+#include <ESP8266WiFi.h>
+#include <BlynkSimpleEsp8266.h>
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BMP085_U.h>   // BMP180 compatible
+#include <DHT.h>
+
+char ssid[] = "YOUR_WIFI_SSID";
+char pass[] = "YOUR_WIFI_PASSWORD";
+
+// ---------- Sensors ----------
+#define DHTPIN 2          // GPIO2 (NodeMCU D4)
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// BMP180
+Adafruit_BMP085_Unified bmp = Adafruit_BMP085_Unified(10085);
+
+// ---------- Anemometer (DC generator on A0) ----------
+// ESP8266 ADC notes:
+// - On bare ESP8266, A0 range is 0–1.0 V
+// - On NodeMCU/Wemos, onboard divider maps 0–3.2~3.3 V to 0–1.0 V ADC
+// Set this according to your board:
+const bool NODEMCU_HAS_DIVIDER = true;
+const float ADC_FULL_SCALE_V = NODEMCU_HAS_DIVIDER ? 3.30f : 1.00f;
+
+// Calibration (you should tune these two constants with your setup):
+// speed_mps = max(0, (V - CAL_V_OFFSET) / CAL_V_PER_MPS)
+// Example placeholder: every 0.12 V above 0.08 V ≈ 1 m/s
+float CAL_V_OFFSET   = 0.08f;   // voltage at ~0 m/s (mechanical/electrical offset)
+float CAL_V_PER_MPS  = 0.12f;   // volts per 1 m/s
+
+// Optional smoothing for the analog input
+float emaAlpha = 0.25f;         // 0..1 (higher = less smoothing)
+float emaVoltage = 0.0f;
+
+// ---------- App timing ----------
+BlynkTimer timer;                // 1-second task
+
+// ---------- Helpers ----------
+float readAnemometerVoltage()
+{
+  // 10-bit ADC (0..1023)
+  int raw = analogRead(A0);
+  float v = (raw / 1023.0f) * ADC_FULL_SCALE_V;
+  // Exponential moving average to reduce jitter
+  emaVoltage = (emaAlpha * v) + ((1.0f - emaAlpha) * emaVoltage);
+  return emaVoltage;
+}
+
+float voltageToWindMps(float v)
+{
+  float mps = (v - CAL_V_OFFSET) / CAL_V_PER_MPS;
+  if (mps < 0) mps = 0;
+  return mps;
+}
+
+void sendSensorData()
+{
+  // --- DHT11 ---
+  float h = dht.readHumidity();
+  float t = dht.readTemperature(); // Celsius
+
+  // Handle occasional DHT NaNs gracefully
+  if (isnan(h) || isnan(t)) {
+    // Try once more quickly
+    delay(50);
+    h = dht.readHumidity();
+    t = dht.readTemperature();
+  }
+
+  // --- BMP180 (pressure & altitude) ---
+  sensors_event_t event;
+  float pressure_hPa = NAN;
+  float altitude_m   = NAN;
+
+  if (bmp.getEvent(&event)) {
+    if (event.pressure) {
+      pressure_hPa = event.pressure; // already in hPa
+      // Calculate altitude using standard sea-level pressure (1013.25 hPa)
+      altitude_m = bmp.pressureToAltitude(SENSORS_PRESSURE_SEALEVELHPA, pressure_hPa);
+    }
+  }
+
+  // --- Anemometer ---
+  float vAnem = readAnemometerVoltage();
+  float wind_mps = voltageToWindMps(vAnem);
+
+  // --- Push to Blynk ---
+  if (!isnan(t))  Blynk.virtualWrite(V0, t);
+  if (!isnan(h))  Blynk.virtualWrite(V1, h);
+  if (!isnan(pressure_hPa)) Blynk.virtualWrite(V2, pressure_hPa);
+  if (!isnan(altitude_m))   Blynk.virtualWrite(V3, altitude_m);
+  Blynk.virtualWrite(V4, wind_mps);
+  Blynk.virtualWrite(V5, vAnem);
+
+  // --- Debug (Serial Monitor) ---
+  Serial.print("T: "); Serial.print(t); Serial.print(" °C, ");
+  Serial.print("H: "); Serial.print(h); Serial.print(" %, ");
+  Serial.print("P: "); Serial.print(pressure_hPa); Serial.print(" hPa, ");
+  Serial.print("Alt: "); Serial.print(altitude_m); Serial.print(" m, ");
+  Serial.print("V: "); Serial.print(vAnem); Serial.print(" V, ");
+  Serial.print("Wind: "); Serial.print(wind_mps); Serial.println(" m/s");
+}
+
+void setup()
+{
+  Serial.begin(115200);
+  delay(200);
+
+  // Sensor init
+  dht.begin();
+  if (!bmp.begin()) {
+    Serial.println("BMP180 not detected. Check wiring/I2C.");
+  }
+
+  // Start Blynk
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
+
+  // Prime EMA with the first read to avoid initial dip
+  emaVoltage = (analogRead(A0) / 1023.0f) * ADC_FULL_SCALE_V;
+
+  // 1-second periodic updates
+  timer.setInterval(1000L, sendSensorData);
+}
+
+void loop()
+{
+  Blynk.run();
+  timer.run();
+}
